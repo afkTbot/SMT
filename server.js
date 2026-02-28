@@ -21,29 +21,77 @@ const openai = new OpenAI({
   apiKey: GITHUB_TOKEN,
 });
 
-// AI Response function using GitHub Models (FREE!)
-async function getAIResponse(userMessage) {
+// ============= CONVERSATION MEMORY =============
+// Store conversation history for each user (in-memory)
+// Key: userId, Value: array of messages
+const conversationHistory = new Map();
+
+// Clean old conversations after 1 hour to save memory
+setInterval(() => {
+  const oneHourAgo = Date.now() - (2 * 60 * 60 * 1000); // 2 hours
+  for (const [userId, data] of conversationHistory.entries()) {
+    if (data.timestamp < oneHourAgo) {
+      conversationHistory.delete(userId);
+    }
+  }
+}, 30 * 60 * 1000); // Run every 30 minutes
+
+// Get conversation history for a user
+function getConversationHistory(userId) {
+  if (!conversationHistory.has(userId)) {
+    conversationHistory.set(userId, {
+      messages: [],
+      timestamp: Date.now(),
+      context: {} // Store user context (destination, persons, etc.)
+    });
+  }
+  return conversationHistory.get(userId);
+}
+
+// Add message to conversation history
+function addToHistory(userId, role, content) {
+  const userData = getConversationHistory(userId);
+  userData.messages.push({ role, content });
+  userData.timestamp = Date.now();
+
+  // Keep only last 20 messages to avoid token limits
+  if (userData.messages.length > 20) {
+    userData.messages = userData.messages.slice(-10);
+  }
+}
+
+// AI Response function using GitHub Models with conversation memory
+async function getAIResponse(userMessage, userId) {
   try {
+    const userData = getConversationHistory(userId);
+
+    // Add current user message to history
+    addToHistory(userId, 'user', userMessage);
+
+    // Build messages array with history
+    const messages = [
+      {
+        role: 'system',
+        content: systemPrompt
+      },
+      ...userData.messages // Include conversation history
+    ];
+
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
-      messages: [
-        {
-          role: 'system',
-          content: systemPrompt
-        },
-        { 
-          role: 'user', 
-          content: userMessage 
-        }
-      ],
+      messages: messages,
       temperature: 0.7,
       max_tokens: 1000,
       top_p: 1,
     });
 
     const assistantMessage = response.choices[0].message.content;
+
+    // Add AI response to history
+    addToHistory(userId, 'assistant', assistantMessage);
+
     return assistantMessage || 'Désolé, je ne peux pas répondre pour le moment. Veuillez réessayer.';
-    
+
   } catch (error) {
     console.error('AI Response Error:', error.message);
     return 'Désolé, une erreur s\'est produite. Veuillez réessayer plus tard.';
@@ -79,8 +127,8 @@ app.post('/webhook/facebook', async (req, res) => {
         const userMessage = webhookEvent.message.text;
         console.log(`FB Message from ${senderId}: ${userMessage}`);
 
-        // Get AI response
-        const aiResponse = await getAIResponse(userMessage);
+        // Get AI response with conversation memory
+        const aiResponse = await getAIResponse(userMessage, senderId);
 
         // Send response back to Facebook
         await sendFacebookMessage(senderId, aiResponse);
@@ -139,8 +187,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
             if (messageText) {
               console.log(`WhatsApp Message from ${from}: ${messageText}`);
 
-              // Get AI response
-              const aiResponse = await getAIResponse(messageText);
+              // Get AI response with conversation memory
+              const aiResponse = await getAIResponse(messageText, from);
 
               // Send response back to WhatsApp
               await sendWhatsAppMessage(from, aiResponse);
